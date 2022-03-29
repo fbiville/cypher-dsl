@@ -108,33 +108,45 @@ final class NodeImplBuilder extends AbstractModelBuilder<NodeModelBuilder> imple
 		});
 	}
 
-	private MethodSpec buildDefaultConstructor() {
+	private MethodSpec buildDefaultConstructor(List<CodeBlock> deferredInitializers) {
 
 		CodeBlock.Builder superCallBuilder = CodeBlock.builder().add("super(");
 		superCallBuilder.add(
 			CodeBlock.join(this.labels.stream().map(l -> CodeBlock.of("$S", l)).collect(Collectors.toList()), ", "));
 		superCallBuilder.add(")");
 
-		return MethodSpec.constructorBuilder()
+		MethodSpec.Builder builder = MethodSpec.constructorBuilder()
 			.addModifiers(Modifier.PUBLIC)
-			.addStatement(superCallBuilder.build())
-			.build();
+			.addStatement(superCallBuilder.build());
+		deferredInitializers.forEach(builder::addStatement);
+		return builder.build();
 	}
 
-	private MethodSpec buildCopyConstructor() {
+	private MethodSpec buildCopyConstructor(List<CodeBlock> deferredInitializers) {
 
 		ParameterSpec symbolicName = ParameterSpec.builder(TYPE_NAME_SYMBOLIC_NAME, "symbolicName").build();
 		ParameterSpec labelsParameter = ParameterSpec
 			.builder(ParameterizedTypeName.get(TYPE_NAME_LIST, TYPE_NAME_NODE_LABEL), "labels").build();
 		ParameterSpec properties = ParameterSpec.builder(ClassName.get(Properties.class), "properties").build();
-		return MethodSpec.constructorBuilder()
+		MethodSpec.Builder builder = MethodSpec.constructorBuilder()
 			.addModifiers(Modifier.PRIVATE)
 			.addParameter(symbolicName)
 			.addParameter(labelsParameter)
 			.addParameter(properties)
-			.addStatement("super($N, $N, $N)", symbolicName, labelsParameter, properties)
-			.build();
+			.addStatement("super($N, $N, $N)", symbolicName, labelsParameter, properties);
+		deferredInitializers.forEach(builder::addStatement);
+		return builder.build();
+	}
 
+	private MethodSpec buildSelfRelInitializingConstructor(List<RelClassAndFieldName> relationships) {
+
+		ParameterSpec backReference = ParameterSpec.builder(className, "backReference").build();
+		MethodSpec.Builder builder = MethodSpec.constructorBuilder()
+			.addModifiers(Modifier.PRIVATE)
+			.addParameter(backReference)
+			.addStatement("super(null, $N.getLabels(), $N.getProperties())", backReference, backReference);
+		relationships.forEach(p -> builder.addStatement("$N = new $T(this, $N)", p.fieldName, p.className, backReference));
+		return builder.build();
 	}
 
 	private MethodSpec buildNamedMethod() {
@@ -177,6 +189,10 @@ final class NodeImplBuilder extends AbstractModelBuilder<NodeModelBuilder> imple
 			String fieldName = p.getNameInDomain() == null ? p.getType() : p.getNameInDomain();
 			ClassName relationshipClassName = extractClassName(p.getRelationshipBuilder());
 			FieldSpec.Builder builder = FieldSpec.builder(relationshipClassName, fieldNameGenerator.generate(fieldName), Modifier.PUBLIC, Modifier.FINAL);
+			// Not filtered before as we need the fields.
+			if (p.getStart() == p.getEnd()) {
+				return builder.build();
+			}
 			if (this == p.getStart()) {
 				builder.initializer("new $T(this, $T.$N)", relationshipClassName, extractClassName(p.getEnd()), p.getEnd().getFieldName());
 			} else {
@@ -189,6 +205,18 @@ final class NodeImplBuilder extends AbstractModelBuilder<NodeModelBuilder> imple
 			.collect(Collectors.toList());
 	}
 
+	private static class RelClassAndFieldName {
+
+		final ClassName className;
+
+		final String fieldName;
+
+		public RelClassAndFieldName(ClassName className, String fieldName) {
+			this.className = className;
+			this.fieldName = fieldName;
+		}
+	}
+
 	@Override
 	protected JavaFile buildJavaFile() {
 
@@ -196,12 +224,31 @@ final class NodeImplBuilder extends AbstractModelBuilder<NodeModelBuilder> imple
 			throw new IllegalStateException("Cannot build NodeImpl without labels!");
 		}
 
-		TypeSpec newType = addGenerated(TypeSpec.classBuilder(className))
+		List<RelClassAndFieldName> relationships = relationshipDefinitions.stream()
+			.filter(p -> p.getStart() == p.getEnd())
+			.map(p -> {
+				ClassName relationshipClassName = extractClassName(p.getRelationshipBuilder());
+				String fieldName = fieldNameGenerator.generate(p.getNameInDomain() == null ? p.getType() : p.getNameInDomain());
+				return new RelClassAndFieldName(relationshipClassName, fieldName);
+			})
+			.collect(Collectors.toList());
+
+		List<CodeBlock> deferredInitializers = relationships.stream()
+			.map(p -> CodeBlock.of("$N = new $T(this, new $T(this))", p.fieldName, p.className, className))
+			.collect(Collectors.toList());
+
+		TypeSpec.Builder builder = addGenerated(TypeSpec.classBuilder(className))
 			.superclass(ParameterizedTypeName.get(TYPE_NAME_NODE_BASE, className))
 			.addModifiers(Modifier.PUBLIC, Modifier.FINAL)
 			.addFields(buildFields())
-			.addMethod(buildDefaultConstructor())
-			.addMethod(buildCopyConstructor())
+			.addMethod(buildDefaultConstructor(deferredInitializers))
+			.addMethod(buildCopyConstructor(deferredInitializers));
+
+		if (!relationships.isEmpty()) {
+			builder.addMethod(buildSelfRelInitializingConstructor(relationships));
+		}
+
+		TypeSpec newType = builder
 			.addMethod(buildNamedMethod())
 			.addMethod(buildWithPropertiesMethod())
 			.build();

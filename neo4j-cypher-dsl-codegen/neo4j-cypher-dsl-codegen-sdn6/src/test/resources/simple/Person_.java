@@ -21,16 +21,23 @@ public final class Person_ extends NodeBase<Person_> {
 
 	public final Property BORN = this.property("born");
 
-	public final Follows_ FOLLOWS = new Follows_(this, Person_.PERSON);
+	public final Follows_ FOLLOWS;
 
 	public final Produced_ PRODUCED = new Produced_(this, Movie_.MOVIE);
 
 	public Person_() {
 		super("Person");
+		FOLLOWS = new Follows_(this, new Person_(this));
 	}
 
 	private Person_(SymbolicName symbolicName, List<NodeLabel> labels, Properties properties) {
 		super(symbolicName, labels, properties);
+		FOLLOWS = new Follows_(this, new Person_(this));
+	}
+
+	private Person_(Person_ backReference) {
+		super(null, backReference.getLabels(), backReference.getProperties());
+		FOLLOWS = new Follows_(this, backReference);
 	}
 
 	@Override
